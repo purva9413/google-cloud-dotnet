@@ -51,9 +51,12 @@ namespace Google.Cloud.Spanner.V1
         private readonly SpannerClient _client;
         private readonly ReadOrQueryRequest _request;
         private readonly PooledSession _pooledSession;
+        private readonly TargetedMultiplexSession _muxSession;
         private readonly CallSettings _callSettings;
         private readonly RetrySettings _retrySettings;
         private readonly int _maxBufferSize;
+        private readonly TransactionOptions _transactionOptions;
+        private readonly bool _isSingleUse;
 
         /// <summary>
         /// Indicates whether the underlying stream has completed. We may still be draining results from the buffer.
@@ -71,6 +74,14 @@ namespace Google.Cloud.Spanner.V1
         {
         }
 
+        internal ResultStream(SpannerClient client, ReadOrQueryRequest request, TargetedMultiplexSession muxSession, CallSettings callSettings, TransactionOptions creationOptions, bool isSingleUse)
+            : this(client, request, muxSession, callSettings, DefaultMaxBufferSize, s_defaultRetrySettings)
+        {
+            _transactionOptions = creationOptions;
+            _isSingleUse = isSingleUse;
+
+        }
+
         /// <summary>
         /// Constructor with complete control that does not perform any validation.
         /// </summary>
@@ -86,6 +97,26 @@ namespace Google.Cloud.Spanner.V1
             _client = GaxPreconditions.CheckNotNull(client, nameof(client));
             _request = GaxPreconditions.CheckNotNull(request, nameof(request));
             _pooledSession = GaxPreconditions.CheckNotNull(pooledSession, nameof(pooledSession));
+            _callSettings = callSettings;
+            _maxBufferSize = GaxPreconditions.CheckArgumentRange(maxBufferSize, nameof(maxBufferSize), 1, 10_000);
+            _retrySettings = GaxPreconditions.CheckNotNull(retrySettings, nameof(retrySettings));
+        }
+
+        /// <summary>
+        /// Constructor with complete control that does not perform any validation.
+        /// </summary>
+        internal ResultStream(
+            SpannerClient client,
+            ReadOrQueryRequest request,
+            TargetedMultiplexSession muxSession,
+            CallSettings callSettings,
+            int maxBufferSize,
+            RetrySettings retrySettings)
+        {
+            _buffer = new LinkedList<PartialResultSet>();
+            _client = GaxPreconditions.CheckNotNull(client, nameof(client));
+            _request = GaxPreconditions.CheckNotNull(request, nameof(request));
+            _muxSession = GaxPreconditions.CheckNotNull(_muxSession, nameof(muxSession));
             _callSettings = callSettings;
             _maxBufferSize = GaxPreconditions.CheckArgumentRange(maxBufferSize, nameof(maxBufferSize), 1, 10_000);
             _retrySettings = GaxPreconditions.CheckNotNull(retrySettings, nameof(retrySettings));
@@ -142,12 +173,25 @@ namespace Google.Cloud.Spanner.V1
                         // but doing it every time simplifies implementation and adds little overhead, because
                         // once there's a transaction ID, ExecuteMaybeWithTransactionSelectorAsync returns
                         // inmediately.
-                        await _pooledSession.ExecuteMaybeWithTransactionSelectorAsync(
+                        if (_muxSession != null)
+                        {
+                            await _muxSession.ExecuteMaybeWithTransactionSelectorAsync(
                             transactionSelectorSetter: SetCommandTransaction,
                             commandAsync: ExecuteStreamingAsync,
                             inlinedTransactionExtractor: GetInlinedTransaction,
                             skipTransactionCreation: false,
-                            cancellationToken).ConfigureAwait(false);
+                            cancellationToken, _transactionOptions, _isSingleUse).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await _pooledSession.ExecuteMaybeWithTransactionSelectorAsync(
+                               transactionSelectorSetter: SetCommandTransaction,
+                               commandAsync: ExecuteStreamingAsync,
+                               inlinedTransactionExtractor: GetInlinedTransaction,
+                               skipTransactionCreation: false,
+                               cancellationToken).ConfigureAwait(false);
+                        }
+                           
 
                         void SetCommandTransaction(TransactionSelector transactionSelector) => _request.Transaction = transactionSelector;
 

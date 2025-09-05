@@ -29,7 +29,7 @@ namespace Google.Cloud.Spanner.V1
     public partial class SessionPool
     {
         // Note: Internal for test purposes.
-        internal sealed class TargetedSessionPool : SessionPoolBase
+        internal class TargetedSessionPool : SessionPoolBase
         {
             private static readonly TransactionOptions s_readWriteOptions = new TransactionOptions { ReadWrite = new TransactionOptions.Types.ReadWrite() };
 
@@ -39,6 +39,8 @@ namespace Google.Cloud.Spanner.V1
             // Clone before use, this will hold the amount of sessions to create in each batch
             // so it can't be shared amongst requests.
             private readonly BatchCreateSessionsRequest _batchCreateSessionRequestTemplate;
+
+            private readonly CreateSessionRequest _createSessionRequestTemplate;
 
             // Mutable state, which should be accessed within the lock
 
@@ -101,7 +103,7 @@ namespace Google.Cloud.Spanner.V1
 
             public override bool TracksSessions => true;
 
-            internal TargetedSessionPool(SessionPool parent, SessionPoolSegmentKey key, bool acquireSessionsImmediately) : base(parent)
+            internal TargetedSessionPool(SessionPool parent, SessionPoolSegmentKey key, bool acquireSessionsImmediately, bool isMultiplex = true) : base(parent)
             {
                 _segmentKey = GaxPreconditions.CheckNotNull(key, nameof(key));
                 _batchCreateSessionRequestTemplate = new BatchCreateSessionsRequest
@@ -113,6 +115,17 @@ namespace Google.Cloud.Spanner.V1
                         CreatorRole = key.DatabaseRole ?? ""
                     }
                 };
+
+                //_createSessionRequestTemplate = new CreateSessionRequest
+                //{
+                //    DatabaseAsDatabaseName = key.DatabaseName,
+                //    Session = new Session
+                //    {
+                //        Labels = { parent.Options.SessionLabels },
+                //        CreatorRole = key.DatabaseRole ?? "",
+                //        Multiplexed = true
+                //    }
+                //};
 
                 if (acquireSessionsImmediately)
                 {
@@ -295,7 +308,7 @@ namespace Google.Cloud.Spanner.V1
             /// Refreshes a session by executing a trivial SELECT SQL statement.
             /// This is performed via the client session itself so it can update its next refresh time.
             /// </summary>
-            private async Task RefreshAsync(PooledSession session)
+            private async Task RefreshAsync(PooledSession session) // Purva: This is where legacy sessions are refreshed. We need similar 7 day refresh logic for mux (Maybe in session pool manager?)
             {
                 // While we're refreshing a session, it's as if we're creating a new one - it's a period of time
                 // where there's already an RPC in flight, and when it completes a session will be available.
@@ -551,6 +564,23 @@ namespace Google.Cloud.Spanner.V1
 
             private async Task<IList<PooledSession>> CreatePooledSessionsAsync(CancellationToken cancellationToken)
             {
+
+                return await BatchCreatePooledSessionsAsync(cancellationToken).ConfigureAwait(false);
+                //Boolean useMultiplex = true; // TODO: Make this value modifable for easy toggle incase of failures
+
+                //if(useMultiplex)
+                //{
+
+                //}
+                //else
+                //{
+                //    return await BatchCreatePooledSessionsAsync(cancellationToken).ConfigureAwait(false);
+                //}
+
+            }
+
+            private async Task<IList<PooledSession>>  BatchCreatePooledSessionsAsync(CancellationToken cancellationToken)
+            {
                 int batchSize;
                 lock (_lock)
                 {
@@ -589,7 +619,7 @@ namespace Google.Cloud.Spanner.V1
                         success = true;
                         actualCreatedSessions = batchSessionCreateResponse.Session.Count;
 
-                        foreach(var sessionProto in batchSessionCreateResponse.Session)
+                        foreach (var sessionProto in batchSessionCreateResponse.Session)
                         {
                             pooledSessions.Add(PooledSession.FromSessionName(this, sessionProto.SessionName));
                         }
@@ -608,7 +638,7 @@ namespace Google.Cloud.Spanner.V1
                         }
                     }
                 }
-                catch(Exception e)
+                catch (Exception e)
                 {
                     Parent._logger.Warn(() => $"Failed to batch create sessions for {_segmentKey}", e);
                     throw;

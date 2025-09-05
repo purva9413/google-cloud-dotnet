@@ -38,7 +38,7 @@ namespace Google.Cloud.Spanner.V1.Internal
             }
             catch (RpcException ex) when (ex.CheckForSessionExpiredError(session))
             {
-                throw;
+                throw; // TODO: Purva this will never throw because ex.CheckForSessionExpiredError always returns false. Is this a bug?
             }
         }
 

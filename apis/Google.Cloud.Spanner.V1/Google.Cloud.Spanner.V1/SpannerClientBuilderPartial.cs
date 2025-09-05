@@ -32,26 +32,31 @@ namespace Google.Cloud.Spanner.V1
         {
             // Note: Can't use nameof for affinity keys, as we need the original proto field name.
 
-            // Creating a session isn't bound to a channel, but binds the resulting session to that channel
-            new MethodConfig
-            {
-                Name = { "/google.spanner.v1.Spanner/CreateSession" },
-                Affinity = new AffinityConfig { AffinityKey = "name", Command = Command.Bind }
-            },
+            //// Creating a session isn't bound to a channel, but binds the resulting session to that channel
+            //new MethodConfig
+            //{
+            //    Name = { "/google.spanner.v1.Spanner/CreateSession" },
+            //    Affinity = new AffinityConfig { AffinityKey = "name", Command = Command.Bind }
+            //},
 
-            // Batch creating sessions isn't bound to a channel, but binds the resulting sessions to that channel
-            new MethodConfig
-            {
-                Name = { "/google.spanner.v1.Spanner/BatchCreateSessions" },
-                Affinity = new AffinityConfig { AffinityKey = "session.name", Command = Command.Bind }
-            },
+            //// Batch creating sessions isn't bound to a channel, but binds the resulting sessions to that channel
+            //new MethodConfig
+            //{
+            //    Name = { "/google.spanner.v1.Spanner/BatchCreateSessions" },
+            //    Affinity = new AffinityConfig { AffinityKey = "session.name", Command = Command.Bind }
+            //},
 
-            // Most methods are bound by the session within the request
+            //// Most methods are bound by the session within the request
+            //new MethodConfig
+            //{
+            //    // We don't currently use this, but include it for completeness...
+            //    Name = { "/google.spanner.v1.Spanner/GetSession" },
+            //    Affinity = new AffinityConfig { AffinityKey = "name", Command = Command.Bound }
+            //},
             new MethodConfig
             {
-                // We don't currently use this, but include it for completeness...
-                Name = { "/google.spanner.v1.Spanner/GetSession" },
-                Affinity = new AffinityConfig { AffinityKey = "name", Command = Command.Bound }
+                Name = { "/google.spanner.v1.Spanner/BeginTransaction" },
+                Affinity = new AffinityConfig { AffinityKey = "id", Command = Command.Bind }
             },
             new MethodConfig
             {
@@ -61,13 +66,14 @@ namespace Google.Cloud.Spanner.V1
                     "/google.spanner.v1.Spanner/ExecuteStreamingSql",
                     "/google.spanner.v1.Spanner/Read",
                     "/google.spanner.v1.Spanner/StreamingRead",
-                    "/google.spanner.v1.Spanner/BeginTransaction",
+                    //"/google.spanner.v1.Spanner/BeginTransaction",
                     "/google.spanner.v1.Spanner/Commit",
                     "/google.spanner.v1.Spanner/Rollback",
                     "/google.spanner.v1.Spanner/PartitionQuery",
                     "/google.spanner.v1.Spanner/PartitionRead",
                 },
-                Affinity = new AffinityConfig { AffinityKey = "session", Command = Command.Bound }
+                //Affinity = new AffinityConfig { AffinityKey = "session", Command = Command.Bound }
+                Affinity = new AffinityConfig { AffinityKey = "transaction.id", Command = Command.Bound }
             },
 
             // DeleteSession is bound by the session within the request, and removes the key afterwards

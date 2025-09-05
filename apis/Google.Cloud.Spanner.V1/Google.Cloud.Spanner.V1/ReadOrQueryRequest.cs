@@ -296,6 +296,16 @@ namespace Google.Cloud.Spanner.V1
         public ReliableStreamReader ExecuteReadOrQueryStreamReader(PooledSession session, CallSettings callSettings) =>
             session.ExecuteReadOrQueryStreamReader(this, callSettings);
 
+        /// <summary>
+        /// Creates a <see cref="ReliableStreamReader"/> for this request
+        /// </summary>
+        /// <param name="session">The session to use for the request.</param>
+        /// <param name="callSettings">If not null, applies overrides to this RPC call.</param>
+        /// <param name="creationOptions"></param>
+        /// <returns>A <see cref="ReliableStreamReader"/> for this request.</returns>
+        public ReliableStreamReader ExecuteReadOrQueryStreamReader(TargetedMultiplexSession session, CallSettings callSettings, TransactionOptions creationOptions) =>
+            session.ExecuteReadOrQueryStreamReader(this, callSettings, creationOptions);
+
         /// <inheritdoc/>
         public override bool Equals(object o) =>
             o is ReadOrQueryRequest request && request.UnderlyingRequest.Equals(UnderlyingRequest);
@@ -368,6 +378,16 @@ namespace Google.Cloud.Spanner.V1
         /// <returns>A task representing the asynchronous operation. When the task completes, the result is the response from the RPC.</returns>
         public Task<PartitionResponse> PartitionReadOrQueryAsync(PooledSession session, CallSettings callSettings) =>
             session.PartitionReadOrQueryAsync(this, callSettings);
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="session"></param>
+        /// <param name="callSettings"></param>
+        /// <param name="creationOptions"></param>
+        /// <returns></returns>
+        public Task<PartitionResponse> PartitionReadOrQueryAsync(TargetedMultiplexSession session, CallSettings callSettings, TransactionOptions creationOptions) =>
+            session.PartitionReadOrQueryAsync(this, callSettings, creationOptions);
 
         /// <inheritdoc/>
         public override bool Equals(object o) =>

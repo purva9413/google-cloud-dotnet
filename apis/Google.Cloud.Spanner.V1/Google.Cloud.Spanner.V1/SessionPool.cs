@@ -43,6 +43,8 @@ namespace Google.Cloud.Spanner.V1
 
         private readonly SemaphoreSlim _batchSessionCreateSemaphore;
 
+        
+
         /// <summary>
         /// The options governing this session pool.
         /// </summary>
