@@ -493,6 +493,12 @@ namespace Google.Cloud.Spanner.Data
         internal ChannelCredentials CredentialOverride { get; }
         internal GoogleCredential GoogleCredential { get; }
 
+        internal Boolean useMultiplex
+        {
+            get => GetValueOrDefault(nameof(useMultiplex), "True").Equals("True", StringComparison.OrdinalIgnoreCase);
+            set => this[nameof(useMultiplex)] = value.ToString(); // Always "True" or "False", regardless of culture.
+        }
+
         private SessionPoolManager _sessionPoolManager = SessionPoolManager.Default;
 
         /// <summary>
@@ -510,7 +516,10 @@ namespace Google.Cloud.Spanner.Data
         }
 
         internal Task<SessionPool> AcquireSessionPoolAsync() =>
-            SessionPoolManager.AcquireSessionPoolAsync(new SpannerClientCreationOptions(this));
+            SessionPoolManager.AcquireSessionPoolAsync(new SpannerClientCreationOptions(this)); // TODO: Purva add in a new method to get Mux session instead of SessionPool
+
+        internal async Task<TargetedMultiplexSession> AcquireMultiplexSessionAsync() =>
+            await SessionPoolManager.AcquireMultiplexSession(new SpannerClientCreationOptions(this), DatabaseName, DatabaseRole).ConfigureAwait(false);
 
         /// <summary>
         /// Copy constructor, used for cloning. (This allows for the use of object initializers, unlike

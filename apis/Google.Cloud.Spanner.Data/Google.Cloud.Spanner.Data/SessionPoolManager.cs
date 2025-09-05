@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using Google.Api.Gax;
+using Google.Cloud.Spanner.Common.V1;
 using Google.Cloud.Spanner.V1;
 using Google.Cloud.Spanner.V1.Internal.Logging;
 using System;
@@ -22,6 +23,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml.Linq;
 using static Google.Cloud.Spanner.V1.SessionPool;
 
 namespace Google.Cloud.Spanner.Data
@@ -55,6 +57,9 @@ namespace Google.Cloud.Spanner.Data
             new ConcurrentDictionary<SpannerClientCreationOptions, TargetedPool>();
         private readonly ConcurrentDictionary<SessionPool, TargetedPool> _poolReverseLookup =
             new ConcurrentDictionary<SessionPool, TargetedPool>();
+
+        private readonly ConcurrentDictionary<SpannerClientCreationOptions, TargetedMultiplexSession> _targetedMuxSessions =
+            new ConcurrentDictionary<SpannerClientCreationOptions, TargetedMultiplexSession>();
 
         /// <summary>
         /// The session pool options used for every <see cref="SessionPool"/> created by this session pool manager.
@@ -126,6 +131,21 @@ namespace Google.Cloud.Spanner.Data
             return targetedPool.SessionPoolTask;
         }
 
+        internal async Task<TargetedMultiplexSession> AcquireMultiplexSession(SpannerClientCreationOptions options, DatabaseName dbName, string dbRole)
+        {
+            GaxPreconditions.CheckNotNull(options, nameof(options));
+            var muxSession = _targetedMuxSessions.GetOrAdd(options, await CreateMultiplexSessionAsync().ConfigureAwait(false));
+            return muxSession;
+
+            async Task<TargetedMultiplexSession> CreateMultiplexSessionAsync()
+            {
+                var client = await _clientFactory.Invoke(options, SpannerSettings).ConfigureAwait(false);
+                var muxSession = new TargetedMultiplexSession(client, dbName, dbRole);
+
+                return muxSession;
+            }
+        }
+
         /// <summary>
         /// Decrements the connection count associated with a client session pool.
         /// </summary>
@@ -182,6 +202,7 @@ namespace Google.Cloud.Spanner.Data
                 {
                     var client = await parent._clientFactory.Invoke(clientCreationOptions, parent.SpannerSettings).ConfigureAwait(false);
                     var pool = new SessionPool(client, parent.SessionPoolOptions);
+
                     parent._poolReverseLookup.TryAdd(pool, this);
                     return pool;
                 }

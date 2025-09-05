@@ -172,13 +172,26 @@ namespace Google.Cloud.Spanner.Data
 
             async Task<ReliableStreamReader> Impl()
             {
-                PooledSession session = await _connection.AcquireSessionAsync(_creationOptions, cancellationToken).ConfigureAwait(false);
+                PooledSession session = null;
+                TargetedMultiplexSession muxSession = null;
+
                 var callSettings = _connection.CreateCallSettings(
                     request.GetCallSettings,
                     cancellationToken);
-                var reader = request.ExecuteReadOrQueryStreamReader(session, callSettings);
-                reader.StreamClosed += delegate { session.ReleaseToPool(forceDelete: false); };
-                return reader;
+
+                if (_connection.useMultiplex)
+                {
+                    muxSession = await _connection.AcquireMultiplexSessionAsync().ConfigureAwait(false);
+                    var reader = request.ExecuteReadOrQueryStreamReader(muxSession, callSettings, _creationOptions?.GetTransactionOptions());
+                    return reader;
+                }
+                else
+                {
+                    session = await _connection.AcquireSessionAsync(_creationOptions, cancellationToken).ConfigureAwait(false);
+                    var reader = request.ExecuteReadOrQueryStreamReader(session, callSettings);
+                    reader.StreamClosed += delegate { session.ReleaseToPool(forceDelete: false); };
+                    return reader;
+                }
             }
         }
     }

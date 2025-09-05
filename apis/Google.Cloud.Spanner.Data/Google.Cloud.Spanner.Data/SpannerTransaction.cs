@@ -77,6 +77,8 @@ namespace Google.Cloud.Spanner.Data
         /// </summary>
         private int _lastDmlSequenceNumber = 0;
 
+        private Boolean useMultiplex => _muxSession != null;
+
         /// <inheritdoc />
         public override IsolationLevel IsolationLevel => IsolationLevel.Serializable;
 
@@ -105,6 +107,8 @@ namespace Google.Cloud.Spanner.Data
         public TransactionMode Mode => _creationOptions.TransactionMode;
 
         private readonly PooledSession _session;
+
+        private readonly TargetedMultiplexSession _muxSession;
 
         /// <summary>
         /// Options to apply to the transaction after creation, usually before committing the transaction
@@ -217,12 +221,33 @@ namespace Google.Cloud.Spanner.Data
             _isRetriable = isRetriable;
         }
 
+        internal SpannerTransaction(
+            SpannerConnection connection,
+            TargetedMultiplexSession session,
+            SpannerTransactionCreationOptions creationOptions,
+            SpannerTransactionOptions transactionOptions,
+            bool isRetriable)
+        {
+            SpannerConnection = GaxPreconditions.CheckNotNull(connection, nameof(connection));
+            _muxSession = GaxPreconditions.CheckNotNull(session, nameof(session));
+            _creationOptions = GaxPreconditions.CheckNotNull(creationOptions, nameof(creationOptions));
+            TransactionOptions = transactionOptions is null ? new SpannerTransactionOptions() : new SpannerTransactionOptions(transactionOptions);
+            _isRetriable = isRetriable;
+        }
+
         /// <summary>
         /// Whether this transaction is detached or not.
         /// A detached transaction's resources are not pooled, so the transaction may be
         /// shared across processes for instance, for partitioned reads.
         /// </summary>
-        public bool IsDetached => _session.IsDetached;
+        public bool IsDetached
+        {
+            get
+            {
+                GaxPreconditions.CheckState(!useMultiplex, "Detached transactions are not allowed when using Multiplex Sessions.");
+                return _session.IsDetached;
+            }
+        }
 
         /// <summary>
         /// Specifies how resources are treated when <see cref="Dispose"/> is called.
@@ -286,7 +311,18 @@ namespace Google.Cloud.Spanner.Data
                     var callSettings = SpannerConnection.CreateCallSettings(
                         partitionRequest.GetCallSettings,
                         timeoutSeconds, cancellationToken);
-                    var response = await partitionRequest.PartitionReadOrQueryAsync(_session, callSettings).ConfigureAwait(false);
+
+                    PartitionResponse response;
+
+                    if(useMultiplex)
+                    {
+                        response = await partitionRequest.PartitionReadOrQueryAsync(_muxSession, callSettings, _creationOptions?.GetTransactionOptions()).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        response = await partitionRequest.PartitionReadOrQueryAsync(_session, callSettings).ConfigureAwait(false);
+                    }
+
                     return response.Partitions.Select(x => x.PartitionToken);
                 },
                 "SpannerTransaction.GetPartitionTokensAsync", SpannerConnection.Logger);
@@ -328,7 +364,7 @@ namespace Google.Cloud.Spanner.Data
             var callSettings = SpannerConnection.CreateCallSettings(
                 request.GetCallSettings,
                 cancellationToken);
-            return Task.FromResult(request.ExecuteReadOrQueryStreamReader(_session, callSettings));
+            return useMultiplex ? Task.FromResult(request.ExecuteReadOrQueryStreamReader(_muxSession, callSettings, _creationOptions?.GetTransactionOptions())) : Task.FromResult(request.ExecuteReadOrQueryStreamReader(_session, callSettings));
         }
 
         Task<long> ISpannerTransaction.ExecuteDmlAsync(ExecuteSqlRequest request, CancellationToken cancellationToken, int timeoutSeconds)
@@ -344,7 +380,8 @@ namespace Google.Cloud.Spanner.Data
                 // Note: ExecuteSql would work, but by using a streaming call we enable potential future scenarios
                 // where the server returns interim resume tokens to avoid timeouts.
                 var callSettings = SpannerConnection.CreateCallSettings(settings => settings.ExecuteStreamingSqlSettings, timeoutSeconds, cancellationToken);
-                using (var reader = _session.ExecuteSqlStreamReader(request, callSettings))
+                //var session = _muxSession ?? _session;
+                using (var reader = useMultiplex ? _muxSession.ExecuteSqlStreamReader(request, callSettings, _creationOptions?.GetTransactionOptions(), _creationOptions?.IsSingleUse == true) : _session.ExecuteSqlStreamReader(request, callSettings))
                 {
                     await reader.NextAsync(cancellationToken).ConfigureAwait(false);
                     var stats = reader.Stats;
@@ -377,7 +414,7 @@ namespace Google.Cloud.Spanner.Data
             return ExecuteHelper.WithErrorTranslationAndProfiling(async () =>
             {
                 var callSettings = SpannerConnection.CreateCallSettings(settings => settings.ExecuteStreamingSqlSettings, timeoutSeconds, cancellationToken);
-                using var reader = _session.ExecuteSqlStreamReader(request, callSettings);
+                using var reader = useMultiplex ? _muxSession.ExecuteSqlStreamReader(request, callSettings) : _session.ExecuteSqlStreamReader(request, callSettings);
                 await reader.EnsureInitializedAsync(cancellationToken).ConfigureAwait(false);
                 return reader;
             }, "SpannerTransaction.ExecuteDmlReader", SpannerConnection.Logger);
@@ -394,7 +431,7 @@ namespace Google.Cloud.Spanner.Data
             return ExecuteHelper.WithErrorTranslationAndProfiling(async () =>
             {
                 var callSettings = SpannerConnection.CreateCallSettings(settings => settings.ExecuteBatchDmlSettings, timeoutSeconds, cancellationToken);
-                ExecuteBatchDmlResponse response = await _session.ExecuteBatchDmlAsync(request, callSettings).ConfigureAwait(false);
+                ExecuteBatchDmlResponse response = useMultiplex ? await _muxSession.ExecuteBatchDmlAsync(request, callSettings, _creationOptions?.GetTransactionOptions(), _creationOptions?.IsSingleUse == true).ConfigureAwait(false) : await _session.ExecuteBatchDmlAsync(request, callSettings).ConfigureAwait(false);
                 IEnumerable<long> result = response.ResultSets.Select(rs => rs.Stats.RowCountExact);
                 // Work around an issue with the emulator, which can return an ExecuteBatchDmlResponse without populating a status.
                 // TODO: Remove this when the emulator has been fixed, although it does no harm if it stays longer than strictly necessary.
@@ -446,7 +483,7 @@ namespace Google.Cloud.Spanner.Data
             {
                 var callSettings = SpannerConnection.CreateCallSettings(
                     settings => settings.CommitSettings, TransactionOptions.EffectiveCommitTimeout(SpannerConnection), cancellationToken);
-                var response = await _session.CommitAsync(request, callSettings).ConfigureAwait(false);
+                var response = useMultiplex ? await _muxSession.CommitAsync(request, callSettings).ConfigureAwait(false) : await _session.CommitAsync(request, callSettings).ConfigureAwait(false);
                 Interlocked.Exchange(ref _commited, 1);
                 // We dispose of the SpannerTransaction to inmediately release the session to the pool when possible.
                 Dispose();
@@ -501,7 +538,7 @@ namespace Google.Cloud.Spanner.Data
             var callSettings = SpannerConnection.CreateCallSettings(
                 settings => settings.RollbackSettings, TransactionOptions.EffectiveCommitTimeout(SpannerConnection), cancellationToken);
             await  ExecuteHelper.WithErrorTranslationAndProfiling(
-                () => _session.RollbackAsync(new RollbackRequest(), callSettings),
+                () => useMultiplex ? _muxSession.RollbackAsync(new RollbackRequest(), callSettings, _creationOptions, _creationOptions?.IsSingleUse == true) : _session.RollbackAsync(new RollbackRequest(), callSettings),
                 "SpannerTransaction.Rollback", SpannerConnection.Logger).ConfigureAwait(false);
             Dispose();
         }
@@ -509,17 +546,50 @@ namespace Google.Cloud.Spanner.Data
         /// <summary>
         /// Identifying information about this transaction.
         /// </summary>
-        public TransactionId TransactionId => new TransactionId(
-            SpannerConnection.ConnectionString,
-            _session.SessionName.ToString(),
-            _session.TransactionId?.ToBase64(),
-            TimestampBound);
+        public TransactionId TransactionId {
+            get
+            {
+                string sessionName;
+                string transactionId;
+
+                if(useMultiplex)
+                {
+                    sessionName = _muxSession.SessionName.ToString();
+                    transactionId = _muxSession.GetTransaction(_creationOptions?.GetTransactionOptions(), _creationOptions?.IsSingleUse == true)?.Id?.ToBase64();
+                }
+                else
+                {
+                    sessionName = _session.SessionName.ToString();
+                    transactionId = _session.TransactionId?.ToBase64();
+                }
+
+                return new TransactionId(
+                SpannerConnection.ConnectionString,
+                sessionName,
+                transactionId,
+                TimestampBound);
+            }
+            
+        }
 
         /// <summary>
         /// The read timestamp of the read-only transaction if
         /// <see cref="TimestampBound.ReturnReadTimestamp" /> is true, else <c>null</c>.
         /// </summary>
-        public Timestamp ReadTimestamp => _session.ReadTimestamp;
+        public Timestamp ReadTimestamp {
+            get
+            {
+                if(useMultiplex)
+                {
+                    return _muxSession.GetTransaction(_creationOptions?.GetTransactionOptions(), _creationOptions?.IsSingleUse == true)?.ReadTimestamp;
+                }
+                else
+                {
+                    return _session.ReadTimestamp;
+                }
+            }
+        }
+            
 
         private void CheckNotDisposed()
         {
@@ -552,12 +622,12 @@ namespace Google.Cloud.Spanner.Data
             switch (TransactionOptions.DisposeBehavior)
             {
                 case DisposeBehavior.CloseResources:
-                    _session.ReleaseToPool(forceDelete: true);
+                    _session?.ReleaseToPool(forceDelete: true);
                     break;
                 case DisposeBehavior.Default:
                     // This is a no-op for a detached session.
                     // We don't have to make a distinction here.
-                    _session.ReleaseToPool(forceDelete: false);
+                    _session?.ReleaseToPool(forceDelete: false);
                     break;
                 default:
                     // Default for unknown DisposeBehavior is to do nothing.

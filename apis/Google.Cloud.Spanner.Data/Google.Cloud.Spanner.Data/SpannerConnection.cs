@@ -55,6 +55,8 @@ namespace Google.Cloud.Spanner.Data
         // and released when the connection is closed/disposed.
         private SessionPool _sessionPool;
 
+        private TargetedMultiplexSession _muxSession;
+
         private ConnectionState _state = ConnectionState.Closed;
 
         // State used for TransactionScope-based transactions.
@@ -108,6 +110,8 @@ namespace Google.Cloud.Spanner.Data
         /// The logger used by this connection. This is never null.
         /// </summary>
         internal Logger Logger => Builder.SessionPoolManager.Logger;
+
+        internal Boolean useMultiplex => Builder.useMultiplex;
 
         /// <inheritdoc />
         public override ConnectionState State
@@ -369,7 +373,14 @@ namespace Google.Cloud.Spanner.Data
                     OnStateChange(new StateChangeEventArgs(previousState, ConnectionState.Connecting));
                     try
                     {
-                        _sessionPool = await Builder.AcquireSessionPoolAsync().ConfigureAwait(false);
+                        if(useMultiplex)
+                        {
+                            _muxSession = await Builder.AcquireMultiplexSessionAsync().ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            _sessionPool = await Builder.AcquireSessionPoolAsync().ConfigureAwait(false);
+                        }
                     }
                     finally
                     {
@@ -377,7 +388,14 @@ namespace Google.Cloud.Spanner.Data
                         // but it's not clear whether or not that's a problem.
                         lock (_sync)
                         {
-                            _state = _sessionPool != null ? ConnectionState.Open : ConnectionState.Broken;
+                            if(useMultiplex)
+                            {
+                                _state = _muxSession != null ? ConnectionState.Open : ConnectionState.Broken;
+                            }
+                            else
+                            {
+                                _state = _sessionPool != null ? ConnectionState.Open : ConnectionState.Broken;
+                            }
                         }
                         if (IsOpen)
                         {
@@ -592,18 +610,27 @@ namespace Google.Cloud.Spanner.Data
                 {
                     await OpenAsync(cancellationToken).ConfigureAwait(false);
 
-                    PooledSession session;
-                    if (transactionCreationOptions.TransactionId is null)
+                    if(!useMultiplex)
                     {
-                        session = await AcquireSessionAsync(transactionCreationOptions, cancellationToken).ConfigureAwait(false);
+                        PooledSession session;
+                        if (transactionCreationOptions.TransactionId is null)
+                        {
+                            session = await AcquireSessionAsync(transactionCreationOptions, cancellationToken).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            // TODO: Purva check what conditions lead to Txn Id not being null
+                            GaxPreconditions.CheckState(!useMultiplex, "We cannot have Detached sessions if using Multiplex Session");
+
+                            SessionName sessionName = SessionName.Parse(transactionCreationOptions.TransactionId.Session);
+                            ByteString transactionIdBytes = ByteString.FromBase64(transactionCreationOptions.TransactionId.Id);
+                            session = _sessionPool.CreateDetachedSession(sessionName, transactionIdBytes, TransactionOptions.ModeOneofCase.ReadOnly);
+                        }
+
+                        return new SpannerTransaction(this, session, transactionCreationOptions, transactionOptions, isRetriable: false);
                     }
-                    else
-                    {
-                        SessionName sessionName = SessionName.Parse(transactionCreationOptions.TransactionId.Session);
-                        ByteString transactionIdBytes = ByteString.FromBase64(transactionCreationOptions.TransactionId.Id);
-                        session = _sessionPool.CreateDetachedSession(sessionName, transactionIdBytes, TransactionOptions.ModeOneofCase.ReadOnly);
-                    }
-                    return new SpannerTransaction(this, session, transactionCreationOptions, transactionOptions, isRetriable: false);
+
+                    return new SpannerTransaction(this, _muxSession, transactionCreationOptions, transactionOptions, isRetriable: false);
                 }, "SpannerConnection.BeginTransactionAsync", Logger);
         }
 
@@ -997,15 +1024,26 @@ namespace Google.Cloud.Spanner.Data
         /// <returns>A task which will complete when the session pool has reached its minimum size.</returns>
         public async Task WhenSessionPoolReady(CancellationToken cancellationToken = default)
         {
+            GaxPreconditions.CheckState(!useMultiplex, "WhenSessionPoolReady method called for a Multiplex Session in the connection");
             var sessionPoolSegmentKey = GetSessionPoolSegmentKey(nameof(WhenSessionPoolReady));
             await OpenAsync(cancellationToken).ConfigureAwait(false);
             await _sessionPool.WhenPoolReady(sessionPoolSegmentKey, cancellationToken).ConfigureAwait(false);
+        }
+
+        internal Task<TargetedMultiplexSession> AcquireMultiplexSessionAsync()
+        {
+            if(useMultiplex)
+            {
+                return Builder.AcquireMultiplexSessionAsync();
+            }
+            return null;
         }
 
         internal Task<PooledSession> AcquireSessionAsync(SpannerTransactionCreationOptions creationOptions, CancellationToken cancellationToken)
         {
             SessionPool pool;
             DatabaseName databaseName;
+            purva need to figure out what to do here when acquiresession is called
             lock (_sync)
             {
                 AssertOpen("acquire session.");
@@ -1033,6 +1071,8 @@ namespace Google.Cloud.Spanner.Data
         /// <returns>A task which will complete when the session pool has finished shutting down.</returns>
         public async Task ShutdownSessionPoolAsync(CancellationToken cancellationToken = default)
         {
+            GaxPreconditions.CheckState(!useMultiplex, "ShutdownSessionPoolAsync method called for a Multiplex Session in the connection");
+
             var sessionPoolSegmentKey = GetSessionPoolSegmentKey(nameof(ShutdownSessionPoolAsync));
             await OpenAsync(cancellationToken).ConfigureAwait(false);
             await _sessionPool.ShutdownPoolAsync(sessionPoolSegmentKey, cancellationToken).ConfigureAwait(false);
@@ -1092,6 +1132,7 @@ namespace Google.Cloud.Spanner.Data
                 sessionPool = _sessionPool;
 
                 _sessionPool = null;
+                _muxSession = null;
                 _state = ConnectionState.Closed;
             }
 
