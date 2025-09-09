@@ -33,6 +33,7 @@ namespace Google.Cloud.Spanner.V1
         private Transaction _transaction;
         private readonly object _transactionCreationTaskLock = new object();
         private Task _transactionCreationTask;
+        private readonly object _precommitTokenUpdateLock = new object();
 
         /// <summary>
         /// The name of the session. This is never null.
@@ -95,6 +96,8 @@ namespace Google.Cloud.Spanner.V1
         /// </remarks>
         public ByteString TransactionId => Interlocked.CompareExchange(ref _transaction, null, null)?.Id;
 
+        private MultiplexedSessionPrecommitToken _precommitToken;
+
         /// <summary>
         /// 
         /// </summary>
@@ -153,6 +156,7 @@ namespace Google.Cloud.Spanner.V1
         /// <param name="skipTransactionCreation">If true, transaction creation may be skipped. This is used by commit and rollback
         /// so that a transaction is not created just for inmediate commit or rollback. Note that if there are pending mutations, commit
         /// should set this parameter to false.</param>
+        /// <param name="mutationKey"></param>
         /// <param name="cancellationToken">The cancellation token for the operation.</param>
         /// <returns>A task whose result will be the result from having executed <paramref name="commandAsync"/>.</returns>
         internal async Task<TResponse> ExecuteMaybeWithTransactionSelectorAsync<TResponse>(
@@ -160,7 +164,8 @@ namespace Google.Cloud.Spanner.V1
             Func<Task<TResponse>> commandAsync,
             Func<TResponse, Transaction> inlinedTransactionExtractor,
             bool skipTransactionCreation,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            Mutation mutationKey = null)
         {
             // If this session is configured to use no transaction we just execute the command.
             if (TransactionOptions.ModeCase == ModeOneofCase.None)
@@ -306,7 +311,7 @@ namespace Google.Cloud.Spanner.V1
 
             async Task SetExplicitTransactionAsync(CancellationToken cancellationToken)
             {
-                Transaction transaction = await BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+                Transaction transaction = await BeginTransactionAsync(cancellationToken, mutationKey).ConfigureAwait(false);
                 SetTransaction(transaction);
             }
 
@@ -323,16 +328,17 @@ namespace Google.Cloud.Spanner.V1
             {
                 if (Interlocked.CompareExchange(ref _transaction, transaction, null) is not null)
                 {
-                    throw new InvalidOperationException("This session already contains a transaction. This is a bug in library code.");
+                    throw new InvalidOperationException("A transaction has already been set on this instance. This is a bug in library code.");
                 }
             }
 
-            Task<Transaction> BeginTransactionAsync(CancellationToken cancellationToken)
+            Task<Transaction> BeginTransactionAsync(CancellationToken cancellationToken, Mutation mutationKey = null)
             {
                 var request = new BeginTransactionRequest
                 {
                     Options = TransactionOptions,
                     SessionAsSessionName = SessionName,
+                    MutationKey = mutationKey
                 };
                 var callSettings = Client.Settings.BeginTransactionSettings
                     .WithExpiration(Expiration.FromTimeout(_multiplexSession.Options.Timeout))
@@ -355,13 +361,16 @@ namespace Google.Cloud.Spanner.V1
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
             request.SessionAsSessionName = SessionName;
+            request.PrecommitToken = _precommitToken;
 
             return ExecuteMaybeWithTransactionSelectorAsync(
                 transactionSelectorSetter: SetCommandTransaction,
                 commandAsync: CommitAsync,
                 inlinedTransactionExtractor: null, // Commit does not support inline transactions.
                 skipTransactionCreation: request.Mutations.Count == 0, // If there are only mutations we won't have a transaction but we need one.
-                callSettings?.CancellationToken ?? default);
+                callSettings?.CancellationToken ?? default,
+                // Multiplex sessions needs a mutation key in transaction create for a purely mutation based transaction
+                mutationKey: request.Mutations.Count > 0 ? request.Mutations.ElementAt(0) : null);
 
             void SetCommandTransaction(TransactionSelector transactionSelector)
             {
@@ -375,7 +384,7 @@ namespace Google.Cloud.Spanner.V1
                     case TransactionSelector.SelectorOneofCase.SingleUse:
                         throw new InvalidOperationException("A single use transaction cannot be committed.");
                     default:
-                        throw new InvalidOperationException("Cannot commit a PooledSession with no associated transaction");
+                        throw new InvalidOperationException("Cannot commit with no associated transaction");
                 }
             }
 
@@ -385,12 +394,22 @@ namespace Google.Cloud.Spanner.V1
                 // If not, there's an attempt to commit a non-existent transaction.
                 if (request.TransactionId is null || request.TransactionId.IsEmpty)
                 {
-                    throw new InvalidOperationException("Cannot commit a PooledSession with no associated transaction. " +
-                        "A transaction has not been acquired for this PooledSession because no command execution has been attempted.");
+                    throw new InvalidOperationException("Cannot commit without an associated transaction. " +
+                        "A transaction has not been acquired because no command execution has been attempted.");
                 }
 
-                var response = await RecordSuccessAndExpiredSessions(Client.CommitAsync(request, callSettings)).ConfigureAwait(false);
-                MarkAsCommittedOrRolledBack();
+
+                request.PrecommitToken = _precommitToken;
+                CommitResponse response = await RecordSuccessAndExpiredSessions(Client.CommitAsync(request, callSettings)).ConfigureAwait(false);
+                UpdatePrecommitToken(response.PrecommitToken);
+
+                if(response.MultiplexedSessionRetryCase == CommitResponse.MultiplexedSessionRetryOneofCase.PrecommitToken)
+                {
+                    // One of retry, if signaled to do so by the server with a new Precommit Token
+                    // Precommit token is already updated above with a call to UpdatePrecommitToken
+                    response = await RecordSuccessAndExpiredSessions(Client.CommitAsync(request, callSettings)).ConfigureAwait(false);
+                }
+
                 return response;
             }
         }
@@ -429,7 +448,7 @@ namespace Google.Cloud.Spanner.V1
                     case TransactionSelector.SelectorOneofCase.SingleUse:
                         throw new InvalidOperationException("A single use transaction cannot be rolled back.");
                     default:
-                        throw new InvalidOperationException("Cannot roll back a PooledSession with no associated transaction");
+                        throw new InvalidOperationException("Cannot roll back with no associated transaction");
                 }
             }
 
@@ -601,11 +620,13 @@ namespace Google.Cloud.Spanner.V1
 
             void SetCommandTransaction(TransactionSelector transactionSelector) => request.Transaction = transactionSelector;
 
-            Task<ResultSet> ExecuteSqlAsync()
+            async Task<ResultSet> ExecuteSqlAsync() // TODO: Purva check consequences of making this an async method
             {
                 Client.MaybeApplyRouteToLeaderHeader(ref callSettings, TransactionMode);
                 MaybeApplyDirectedReadOptions(request);
-                return RecordSuccessAndExpiredSessions(Client.ExecuteSqlAsync(request, callSettings));
+                ResultSet response = await RecordSuccessAndExpiredSessions(Client.ExecuteSqlAsync(request, callSettings)).ConfigureAwait(false);
+                UpdatePrecommitToken(response.PrecommitToken);
+                return response;
             }
 
             Transaction GetInlinedTransaction(ResultSet response) => response?.Metadata?.Transaction;
@@ -635,7 +656,12 @@ namespace Google.Cloud.Spanner.V1
 
             void SetCommandTransaction(TransactionSelector transactionSelector) => request.Transaction = transactionSelector;
 
-            Task<ExecuteBatchDmlResponse> ExecuteBatchDmlAsync() => RecordSuccessAndExpiredSessions(Client.ExecuteBatchDmlAsync(request, callSettings));
+            async Task<ExecuteBatchDmlResponse> ExecuteBatchDmlAsync() // TODO: Purva to check consequence of making this method async
+            {
+                ExecuteBatchDmlResponse response = await RecordSuccessAndExpiredSessions(Client.ExecuteBatchDmlAsync(request, callSettings)).ConfigureAwait(false);
+                UpdatePrecommitToken(response.PrecommitToken);
+                return response;
+            }
 
             Transaction GetInlinedTransaction(ExecuteBatchDmlResponse response) => response?.ResultSets?.FirstOrDefault()?.Metadata?.Transaction;
         }
@@ -676,9 +702,15 @@ namespace Google.Cloud.Spanner.V1
             await task.WithSessionExpiryChecking(Session).ConfigureAwait(false);
         }
 
-        private void UpdatePrecommitToken()
+        internal void UpdatePrecommitToken(MultiplexedSessionPrecommitToken token)
         {
-
+            lock(_precommitTokenUpdateLock) // TOOD: Purva to check if this lock should be around the backend calls instead
+            {
+                if (_precommitToken == null || _precommitToken.SeqNum < token.SeqNum)
+                {
+                    _precommitToken = token;
+                }
+            }
         }
     }
 }

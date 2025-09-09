@@ -131,6 +131,7 @@ namespace Google.Cloud.Spanner.V1
         {
             var value = await ComputeNextAsync(cancellationToken).ConfigureAwait(false);
             Current = value;
+            _transaction.UpdatePrecommitToken(value.PrecommitToken);
             return value != null;
         }
 
@@ -150,7 +151,7 @@ namespace Google.Cloud.Spanner.V1
                 // Buffer contains items up to a resume token or has reached capacity: flush.
                 if (_buffer.Count > 0 && (_finished || !_safeToRetry || !_buffer.Last.Value.ResumeToken.IsEmpty))
                 {
-                    var firstResult = _buffer.First.Value;
+                    PartialResultSet firstResult = _buffer.First.Value;
                     _buffer.RemoveFirst();
                     return firstResult;
                 }
@@ -177,15 +178,15 @@ namespace Google.Cloud.Spanner.V1
                             skipTransactionCreation: false,
                             cancellationToken).ConfigureAwait(false);
                         }
-                        else
-                        {
-                            await _pooledSession.ExecuteMaybeWithTransactionSelectorAsync(
-                               transactionSelectorSetter: SetCommandTransaction,
-                               commandAsync: ExecuteStreamingAsync,
-                               inlinedTransactionExtractor: GetInlinedTransaction,
-                               skipTransactionCreation: false,
-                               cancellationToken).ConfigureAwait(false);
-                        }
+                        //else
+                        //{
+                        //    await _pooledSession.ExecuteMaybeWithTransactionSelectorAsync(
+                        //       transactionSelectorSetter: SetCommandTransaction,
+                        //       commandAsync: ExecuteStreamingAsync,
+                        //       inlinedTransactionExtractor: GetInlinedTransaction,
+                        //       skipTransactionCreation: false,
+                        //       cancellationToken).ConfigureAwait(false);
+                        //}
                            
 
                         void SetCommandTransaction(TransactionSelector transactionSelector) => _request.Transaction = transactionSelector;
@@ -212,7 +213,7 @@ namespace Google.Cloud.Spanner.V1
                         hasNext = await MoveNextAsync().ConfigureAwait(false);
                     }
 
-                    Task<bool> MoveNextAsync() => _grpcCall.ResponseStream.MoveNext(cancellationToken).WithSessionExpiryChecking(_pooledSession.Session);
+                    Task<bool> MoveNextAsync() => _grpcCall.ResponseStream.MoveNext(cancellationToken).WithSessionExpiryChecking(_transaction.Session);
 
                     retryState.Reset();
 
