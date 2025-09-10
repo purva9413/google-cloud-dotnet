@@ -18,11 +18,13 @@ using Google.Cloud.Spanner.Common.V1;
 using Google.Cloud.Spanner.V1.Internal;
 using Google.Cloud.Spanner.V1.Internal.Logging;
 using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
 using System;
 using System.CodeDom;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Management;
 using System.Threading;
 using System.Threading.Tasks;
 using static Google.Cloud.Spanner.V1.TransactionOptions;
@@ -127,19 +129,47 @@ public class TargetedMultiplexSession
         }
     }
 
-    internal async Task<Boolean> RefreshMuxSession()
+    private async Task<Boolean> UpdateMuxSession()
     {
         Session oldSession = _session;
-        if(Session.Expired)
-        {
-            // TODO: How to check if _session has no executing transactions before exchanging?
-            // One way to do this is maintain a temporary second freshSession which will be null except during interim time between refresh _session with freshSession
-            Session freshSession = await CreateSessionsAsync(default).ConfigureAwait(false);
+        // TODO: How to check if _session has no executing transactions before exchanging?
+        // One way to do this is maintain a temporary second freshSession which will be null except during interim time between refresh _session with freshSession
+        Session freshSession = await CreateSessionsAsync(default).ConfigureAwait(false);
 
-            Interlocked.Exchange(ref _session, freshSession);
-        }
+        Interlocked.Exchange(ref _session, freshSession);
 
         return _session != oldSession;
+    }
+
+    internal void MaybeRefreshWithTimePeriodCheck()
+    {
+        
+        DateTime currentTime = DateTime.Now;
+        DateTime sessionCreateTime = Session.CreateTime.ToDateTime();
+
+        if (Session.Expired || currentTime - sessionCreateTime >= TimeSpan.FromDays(28))
+        {
+            // If the session has expired on a client RPC request call, or has exceeded the 28 day Mux session refresh guidance
+            // No request can proceed without us having a new Session to work with
+            // Block on refreshing and getting a new session
+            bool sessionIsRefreshed = UpdateMuxSession().Result;
+
+            if(!sessionIsRefreshed)
+            {
+                throw new Exception("Unable to refresh multiplex session, and the old session has expired or is 28 days past refresh"); 
+            }
+
+            _logger.Info($"Refreshed session since it was expired or past 28 days refresh period. New session {SessionName}");
+        }
+
+            if (currentTime - sessionCreateTime > TimeSpan.FromDays(7))
+        {
+            // The Mux sessions have a lifespan of 28 days. We check if we need a session refresh in every request needing the session
+            // If the timespan of a request needing a session and the session creation time is greater than 7 days, we proactively refresh the mux session
+            // The request can safely use the older session since it is still valid while we do this refresh to fetch the new session.
+            // Hence fire and forget the session refresh.
+            _ = Task.Run(UpdateMuxSession);
+        }
     }
 
     private async Task<Session> CreateSessionsAsync(CancellationToken cancellationToken)

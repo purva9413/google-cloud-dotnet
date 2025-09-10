@@ -332,7 +332,7 @@ namespace Google.Cloud.Spanner.V1
                 }
             }
 
-            Task<Transaction> BeginTransactionAsync(CancellationToken cancellationToken, Mutation mutationKey = null)
+            async Task<Transaction> BeginTransactionAsync(CancellationToken cancellationToken, Mutation mutationKey = null)
             {
                 var request = new BeginTransactionRequest
                 {
@@ -343,7 +343,11 @@ namespace Google.Cloud.Spanner.V1
                 var callSettings = Client.Settings.BeginTransactionSettings
                     .WithExpiration(Expiration.FromTimeout(_multiplexSession.Options.Timeout))
                     .WithCancellationToken(cancellationToken);
-                return RecordSuccessAndExpiredSessions(Client.BeginTransactionAsync(request, callSettings));
+
+                Transaction response = await RecordSuccessAndExpiredSessions(Client.BeginTransactionAsync(request, callSettings)).ConfigureAwait(false);
+                UpdatePrecommitToken(response.PrecommitToken);
+
+                return response;
             }
         }
 
@@ -357,11 +361,11 @@ namespace Google.Cloud.Spanner.V1
         public Task<CommitResponse> CommitAsync(CommitRequest request, CallSettings callSettings)
         {
             //CheckNotDisposed();
-            WaitOnSessionRefresh();
+            MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
             request.SessionAsSessionName = SessionName;
-            request.PrecommitToken = _precommitToken;
+            request.PrecommitToken = FetchPrecommitToken();
 
             return ExecuteMaybeWithTransactionSelectorAsync(
                 transactionSelectorSetter: SetCommandTransaction,
@@ -399,15 +403,17 @@ namespace Google.Cloud.Spanner.V1
                 }
 
 
-                request.PrecommitToken = _precommitToken;
+                request.PrecommitToken = FetchPrecommitToken();
                 CommitResponse response = await RecordSuccessAndExpiredSessions(Client.CommitAsync(request, callSettings)).ConfigureAwait(false);
                 UpdatePrecommitToken(response.PrecommitToken);
 
                 if(response.MultiplexedSessionRetryCase == CommitResponse.MultiplexedSessionRetryOneofCase.PrecommitToken)
                 {
                     // One of retry, if signaled to do so by the server with a new Precommit Token
-                    // Precommit token is already updated above with a call to UpdatePrecommitToken
+                    // Fetch latest precommit token for the retry
+                    request.PrecommitToken = FetchPrecommitToken();
                     response = await RecordSuccessAndExpiredSessions(Client.CommitAsync(request, callSettings)).ConfigureAwait(false);
+                    UpdatePrecommitToken(response.PrecommitToken);
                 }
 
                 return response;
@@ -424,7 +430,7 @@ namespace Google.Cloud.Spanner.V1
         public Task RollbackAsync(RollbackRequest request, CallSettings callSettings)
         {
             //CheckNotDisposed();
-            WaitOnSessionRefresh();
+            MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
             request.SessionAsSessionName = SessionName;
@@ -465,7 +471,7 @@ namespace Google.Cloud.Spanner.V1
                 }
 
                 await RecordSuccessAndExpiredSessions(Client.RollbackAsync(request, callSettings)).ConfigureAwait(false);
-                MarkAsCommittedOrRolledBack();
+                //MarkAsCommittedOrRolledBack();
                 // Just so we can use the same ExecuteMaybeWithTransactionAsync method that expects a result.
                 return true;
             }
@@ -501,7 +507,7 @@ namespace Google.Cloud.Spanner.V1
         internal Task<PartitionResponse> PartitionReadOrQueryAsync(PartitionReadOrQueryRequest request, CallSettings callSettings)
         {
             //CheckNotDisposed();
-            WaitOnSessionRefresh();
+            MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
             request.SessionAsSessionName = SessionName;
@@ -581,7 +587,7 @@ namespace Google.Cloud.Spanner.V1
         internal ReliableStreamReader ExecuteReadOrQueryStreamReader(ReadOrQueryRequest request, CallSettings callSettings)
         {
             //CheckNotDisposed();
-            WaitOnSessionRefresh();
+            MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
             request.SessionAsSessionName = SessionName;
@@ -606,7 +612,7 @@ namespace Google.Cloud.Spanner.V1
         public Task<ResultSet> ExecuteSqlAsync(ExecuteSqlRequest request, CallSettings callSettings)
         {
             //CheckNotDisposed();
-            WaitOnSessionRefresh();
+            MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
             request.SessionAsSessionName = SessionName;
@@ -642,7 +648,7 @@ namespace Google.Cloud.Spanner.V1
         public Task<ExecuteBatchDmlResponse> ExecuteBatchDmlAsync(ExecuteBatchDmlRequest request, CallSettings callSettings)
         {
             //CheckNotDisposed();
-            WaitOnSessionRefresh();
+            MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
             request.SessionAsSessionName = SessionName;
@@ -679,16 +685,9 @@ namespace Google.Cloud.Spanner.V1
             // This was agreed as part of the client library desing.
         }
 
-        private void WaitOnSessionRefresh()
+        private void MaybeWaitOnSessionRefresh()
         {
-            if(Session.Expired)
-            {
-                _ = _multiplexSession.RefreshMuxSession().Result;
-
-                // Purva: Open question -- what does it mean if a transaction needs a Session refresh mid execution?
-                // If Session expires mid txn execution after n operations, does it need any handling on transaction operations on server?
-                // Maybe log if the session got refreshed?
-            }
+            _multiplexSession.MaybeRefreshWithTimePeriodCheck();
         }
 
         private async Task<T> RecordSuccessAndExpiredSessions<T>(Task<T> task)
@@ -710,6 +709,14 @@ namespace Google.Cloud.Spanner.V1
                 {
                     _precommitToken = token;
                 }
+            }
+        }
+
+        internal MultiplexedSessionPrecommitToken FetchPrecommitToken()
+        {
+            lock (_precommitTokenUpdateLock) // TOOD: Purva to check if this lock should be around the backend calls instead
+            {
+                return _precommitToken;
             }
         }
     }
