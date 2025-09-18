@@ -29,7 +29,7 @@ namespace Google.Cloud.Spanner.V1
 {
     public partial class Transaction
     {
-        private readonly TargetedMultiplexSession _multiplexSession;
+        private readonly MultiplexSession _multiplexSession;
         private Transaction _transaction;
         private readonly object _transactionCreationTaskLock = new object();
         private Task _transactionCreationTask;
@@ -96,7 +96,7 @@ namespace Google.Cloud.Spanner.V1
         /// </remarks>
         public ByteString TransactionId => Interlocked.CompareExchange(ref _transaction, null, null)?.Id;
 
-        private MultiplexedSessionPrecommitToken _precommitToken;
+        //internal MultiplexedSessionPrecommitToken PrecommitToken { get; private set; }
 
         /// <summary>
         /// 
@@ -106,7 +106,7 @@ namespace Google.Cloud.Spanner.V1
         /// <param name="transactionOptions"></param>
         /// <param name="singleUseTransaction"></param>
         /// <param name="readTimestamp"></param>
-        public Transaction(TargetedMultiplexSession multiplexSession, ByteString transactionId, TransactionOptions transactionOptions, bool singleUseTransaction, Timestamp readTimestamp)
+        public Transaction(MultiplexSession multiplexSession, ByteString transactionId, TransactionOptions transactionOptions, bool singleUseTransaction, Timestamp readTimestamp)
         {
             _multiplexSession = multiplexSession;
             
@@ -360,7 +360,6 @@ namespace Google.Cloud.Spanner.V1
         /// <returns>A task representing the asynchronous operation. When the task completes, the result is the response from the RPC.</returns>
         public Task<CommitResponse> CommitAsync(CommitRequest request, CallSettings callSettings)
         {
-            //CheckNotDisposed();
             MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
@@ -429,7 +428,6 @@ namespace Google.Cloud.Spanner.V1
         /// <returns>A task representing the asynchronous operation.</returns>
         public Task RollbackAsync(RollbackRequest request, CallSettings callSettings)
         {
-            //CheckNotDisposed();
             MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
@@ -506,7 +504,6 @@ namespace Google.Cloud.Spanner.V1
         /// <returns>A task representing the asynchronous operation. When the task completes, the result is the response from the RPC.</returns>
         internal Task<PartitionResponse> PartitionReadOrQueryAsync(PartitionReadOrQueryRequest request, CallSettings callSettings)
         {
-            //CheckNotDisposed();
             MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
@@ -586,7 +583,6 @@ namespace Google.Cloud.Spanner.V1
         /// <returns>A <see cref="ReliableStreamReader"/> for the streaming read request.</returns>
         internal ReliableStreamReader ExecuteReadOrQueryStreamReader(ReadOrQueryRequest request, CallSettings callSettings)
         {
-            //CheckNotDisposed();
             MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
@@ -611,7 +607,6 @@ namespace Google.Cloud.Spanner.V1
         /// <returns>A task representing the asynchronous operation. When the task completes, the result is the response from the RPC.</returns>
         public Task<ResultSet> ExecuteSqlAsync(ExecuteSqlRequest request, CallSettings callSettings)
         {
-            //CheckNotDisposed();
             MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
@@ -647,7 +642,6 @@ namespace Google.Cloud.Spanner.V1
         /// <returns>A task representing the asynchronous operation. When the task completes, the result is the response from the RPC.</returns>
         public Task<ExecuteBatchDmlResponse> ExecuteBatchDmlAsync(ExecuteBatchDmlRequest request, CallSettings callSettings)
         {
-            //CheckNotDisposed();
             MaybeWaitOnSessionRefresh();
             GaxPreconditions.CheckNotNull(request, nameof(request));
 
@@ -703,11 +697,11 @@ namespace Google.Cloud.Spanner.V1
 
         internal void UpdatePrecommitToken(MultiplexedSessionPrecommitToken token)
         {
-            lock(_precommitTokenUpdateLock) // TOOD: Purva to check if this lock should be around the backend calls instead
+            lock(_precommitTokenUpdateLock)
             {
-                if (_precommitToken == null || _precommitToken.SeqNum < token.SeqNum)
+                if (PrecommitToken == null || token == null || PrecommitToken.SeqNum < token?.SeqNum)
                 {
-                    _precommitToken = token;
+                    PrecommitToken = token;
                 }
             }
         }
@@ -716,7 +710,7 @@ namespace Google.Cloud.Spanner.V1
         {
             lock (_precommitTokenUpdateLock) // TOOD: Purva to check if this lock should be around the backend calls instead
             {
-                return _precommitToken;
+                return PrecommitToken;
             }
         }
     }

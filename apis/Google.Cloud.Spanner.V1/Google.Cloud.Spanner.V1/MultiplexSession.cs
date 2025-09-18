@@ -17,29 +17,28 @@ using Google.Api.Gax.Grpc;
 using Google.Cloud.Spanner.Common.V1;
 using Google.Cloud.Spanner.V1.Internal;
 using Google.Cloud.Spanner.V1.Internal.Logging;
-using Google.Protobuf;
-using Google.Protobuf.WellKnownTypes;
 using System;
-using System.CodeDom;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Management;
 using System.Threading;
 using System.Threading.Tasks;
-using static Google.Cloud.Spanner.V1.TransactionOptions;
 
 namespace Google.Cloud.Spanner.V1;
 
 /// <summary>
 /// TODO: Add summary for mux sessions
 /// </summary>
-public class TargetedMultiplexSession
+public class MultiplexSession
 {
     private readonly SemaphoreSlim _sessionCreateSemaphore;
     private readonly Logger _logger;
     private readonly CreateSessionRequest _createSessionRequestTemplate;
+
     internal Session _session;
+    internal int _markedForRefresh;
+
+    private const double ForceRefreshIntervalInDays = 28.0;
+    private const double SoftRefreshIntervalInDays = 7.0;
+
+    private readonly IClock _clock;
 
     /// <summary>
     /// The client used for all operations in this multiplex session.
@@ -62,6 +61,8 @@ public class TargetedMultiplexSession
         get { return _session; }
         private set { _session = value; }
     }
+
+    private bool MarkedForRefresh => Interlocked.CompareExchange(ref _markedForRefresh, 0, 0) == 1;
 
     /// <summary>
     /// The options governing this multiplex session.
@@ -91,7 +92,7 @@ public class TargetedMultiplexSession
     /// <param name="dbName"></param>
     /// <param name="dbRole"></param>
     /// <param name="options"></param>
-    public TargetedMultiplexSession(SpannerClient client, DatabaseName dbName, string dbRole, MultiplexSessionOptions options)
+    public MultiplexSession(SpannerClient client, DatabaseName dbName, string dbRole, MultiplexSessionOptions options)
     {
         Client = GaxPreconditions.CheckNotNull(client, nameof(client));
         Options = options ?? new MultiplexSessionOptions();
@@ -101,58 +102,35 @@ public class TargetedMultiplexSession
         DatabaseName = dbName;
         DatabaseRole = dbRole;
 
+        _clock = client.Settings.Clock ?? SystemClock.Instance;
+
         _createSessionRequestTemplate = new CreateSessionRequest
         {
             DatabaseAsDatabaseName = DatabaseName,
             Session = new Session
             {
-                Labels = { Options.SessionLabels },
                 CreatorRole = DatabaseRole ?? "",
                 Multiplexed = true
             }
         };
     }
 
-    private void MaybeMarkMuxForRefresh()
-    {
-        if (Session.Expired) // TODO: Maybe add polling of 7 days and refresh
-        {
-            NeedsRefresh = true;
-        }
-    }
-
-    private void CheckNeedsRefresh()
-    {
-        if (NeedsRefresh)
-        {
-            throw new ObjectDisposedException($"Multiplex Session for {SessionName} needs to be refreshed, and cannot be reused.");
-        }
-    }
-
-    private async Task<Boolean> UpdateMuxSession()
+    private async Task<Boolean> UpdateMuxSession(bool needsRefresh, double intervalInDays)
     {
         Session oldSession = _session;
-        // TODO: How to check if _session has no executing transactions before exchanging?
-        // One way to do this is maintain a temporary second freshSession which will be null except during interim time between refresh _session with freshSession
-        Session freshSession = await CreateSessionsAsync(default).ConfigureAwait(false);
-
-        Interlocked.Exchange(ref _session, freshSession);
+        await CreateOrRefreshSessionsAsync(default).ConfigureAwait(false);
 
         return _session != oldSession;
     }
 
     internal void MaybeRefreshWithTimePeriodCheck()
     {
-        
-        DateTime currentTime = DateTime.Now;
-        DateTime sessionCreateTime = Session.CreateTime.ToDateTime();
-
-        if (Session.Expired || currentTime - sessionCreateTime >= TimeSpan.FromDays(28))
+        if (SessionHasExpired(ForceRefreshIntervalInDays))
         {
             // If the session has expired on a client RPC request call, or has exceeded the 28 day Mux session refresh guidance
             // No request can proceed without us having a new Session to work with
             // Block on refreshing and getting a new session
-            bool sessionIsRefreshed = UpdateMuxSession().Result;
+            bool sessionIsRefreshed = UpdateMuxSession(true, ForceRefreshIntervalInDays).Result;
 
             if(!sessionIsRefreshed)
             {
@@ -162,17 +140,31 @@ public class TargetedMultiplexSession
             _logger.Info($"Refreshed session since it was expired or past 28 days refresh period. New session {SessionName}");
         }
 
-            if (currentTime - sessionCreateTime > TimeSpan.FromDays(7))
+        if (SessionHasExpired(SoftRefreshIntervalInDays))
         {
             // The Mux sessions have a lifespan of 28 days. We check if we need a session refresh in every request needing the session
             // If the timespan of a request needing a session and the session creation time is greater than 7 days, we proactively refresh the mux session
             // The request can safely use the older session since it is still valid while we do this refresh to fetch the new session.
             // Hence fire and forget the session refresh.
-            _ = Task.Run(UpdateMuxSession);
+            _ = Task.Run(() => UpdateMuxSession(true, SoftRefreshIntervalInDays));
         }
     }
 
-    private async Task<Session> CreateSessionsAsync(CancellationToken cancellationToken)
+    // internal for testing
+    internal bool SessionHasExpired(double intervalInDays = SoftRefreshIntervalInDays)
+    {
+        DateTime currentTime = _clock.GetCurrentDateTimeUtc();
+        DateTime? sessionCreateTime = _session?.CreateTime.ToDateTime(); // Inherent conversion into UTC DateTime
+
+        if(_session == null || _session.Expired || currentTime - sessionCreateTime >= TimeSpan.FromDays(intervalInDays))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private async Task CreateOrRefreshSessionsAsync(CancellationToken cancellationToken, bool needsRefresh = false)
     {
         try
         {
@@ -180,20 +172,32 @@ public class TargetedMultiplexSession
                 .WithExpiration(Expiration.FromTimeout(Options.Timeout))
                 .WithCancellationToken(cancellationToken);
 
-            CreateSessionRequest createSessionRequest = _createSessionRequestTemplate.Clone(); // TODO: Check if cloning is necessary since we are ideally only creating 1 mux per client
-
             Session multiplexSession;
 
             bool acquiredSemaphore = false;
             try
             {
+                if(needsRefresh && MarkedForRefresh && !SessionHasExpired(ForceRefreshIntervalInDays))
+                {
+                    // If the refresh was triggered for the soft refresh timeline (7 days)
+                    // Some other thread has already marked this session to be refreshed
+                    // Any subsequent request threads can continue using the 'stale' session so let's not block
+                    // On the other hand if the refresh is for the forced refresh timeline (28 days)
+                    // Any subsequent request threads need to be blocked on the Session refresh
+                    return;
+                }
+
                 await _sessionCreateSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
                 acquiredSemaphore = true;
 
-                multiplexSession = await Client.CreateSessionAsync(createSessionRequest, callSettings).ConfigureAwait(false);
+                if(_session == null || (needsRefresh && SessionHasExpired()))
+                {
+                    Interlocked.Exchange(ref _markedForRefresh, 1);
+                    multiplexSession = await Client.CreateSessionAsync(_createSessionRequestTemplate, callSettings).ConfigureAwait(false);
 
-                return multiplexSession;
-
+                    Interlocked.Exchange(ref _session, multiplexSession);
+                    Interlocked.Exchange(ref _markedForRefresh, 0);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -230,42 +234,44 @@ public class TargetedMultiplexSession
         /// <summary>
         /// 
         /// </summary>
-        public MultiplexSessionBuilder()
+        public MultiplexSessionBuilder(DatabaseName databaseName, SpannerClient client)
         {
+            DatabaseName = GaxPreconditions.CheckNotNull(databaseName, nameof(databaseName));
+            Client = GaxPreconditions.CheckNotNull(client, nameof(client));
         }
 
         /// <summary>
         /// The options governing this multiplex session.
         /// </summary>
-        public MultiplexSessionOptions Options { get; }
+        public MultiplexSessionOptions Options { get; set; }
 
         /// <summary>
         /// The database for this multiplex session
         /// </summary>
-        public DatabaseName DatabaseName { get; }
+        public DatabaseName DatabaseName { get; set; }
 
         /// <summary>
         /// The database role of the multiplex session
         /// </summary>
-        public string DatabaseRole { get; }
+        public string DatabaseRole { get; set; }
 
         /// <summary>
         /// The client used for all operations in this multiplex session.
         /// </summary>
-        internal SpannerClient Client { get; }
+        public SpannerClient Client { get; set; }
 
         /// <summary>
         /// 
         /// </summary>
         /// <param name="cancellationToken"></param>
         /// <returns></returns>
-        public async Task<TargetedMultiplexSession> BuildAsync(CancellationToken cancellationToken = default)
+        public async Task<MultiplexSession> BuildAsync(CancellationToken cancellationToken = default)
         {
-            TargetedMultiplexSession targetedMultiplexSession = new TargetedMultiplexSession(Client, DatabaseName, DatabaseRole, Options);
+            MultiplexSession multiplexSession = new MultiplexSession(Client, DatabaseName, DatabaseRole, Options);
 
-            await targetedMultiplexSession.CreateSessionsAsync(cancellationToken).ConfigureAwait(false);
+            await multiplexSession.CreateOrRefreshSessionsAsync(cancellationToken).ConfigureAwait(false);
 
-            return targetedMultiplexSession;
+            return multiplexSession;
         }
     }
 }

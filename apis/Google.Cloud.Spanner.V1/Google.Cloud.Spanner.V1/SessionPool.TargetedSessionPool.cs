@@ -40,8 +40,6 @@ namespace Google.Cloud.Spanner.V1
             // so it can't be shared amongst requests.
             private readonly BatchCreateSessionsRequest _batchCreateSessionRequestTemplate;
 
-            private readonly CreateSessionRequest _createSessionRequestTemplate;
-
             // Mutable state, which should be accessed within the lock
 
             private readonly ConcurrentStack<PooledSession> _sessions = new ConcurrentStack<PooledSession>();

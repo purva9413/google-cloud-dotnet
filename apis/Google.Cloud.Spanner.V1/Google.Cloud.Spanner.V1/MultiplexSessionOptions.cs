@@ -13,9 +13,6 @@
 // limitations under the License.
 
 using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Text;
 
 namespace Google.Cloud.Spanner.V1;
 
@@ -47,11 +44,6 @@ public class MultiplexSessionOptions
         get => _timeout;
         set => _timeout = CheckPositiveTimeSpan(value);
     }
-
-    /// <summary>
-    /// Labels to use for any sessions created with this pool.
-    /// </summary>
-    public IDictionary<string, string> SessionLabels { get; } = new ConcurrentDictionary<string, string>();
 
     // TODO: Move to GAX if we find we need it in other libraries. (We have CheckNonNegative already.)
     private static TimeSpan CheckPositiveTimeSpan(TimeSpan value)

@@ -299,12 +299,11 @@ namespace Google.Cloud.Spanner.V1
         /// <summary>
         /// Creates a <see cref="ReliableStreamReader"/> for this request
         /// </summary>
-        /// <param name="session">The session to use for the request.</param>
+        /// <param name="transaction"></param>
         /// <param name="callSettings">If not null, applies overrides to this RPC call.</param>
-        /// <param name="creationOptions"></param>
         /// <returns>A <see cref="ReliableStreamReader"/> for this request.</returns>
-        public ReliableStreamReader ExecuteReadOrQueryStreamReader(TargetedMultiplexSession session, CallSettings callSettings, TransactionOptions creationOptions) =>
-            session.ExecuteReadOrQueryStreamReader(this, callSettings, creationOptions);
+        public ReliableStreamReader ExecuteReadOrQueryStreamReader(Transaction transaction, CallSettings callSettings) =>
+            transaction.ExecuteReadOrQueryStreamReader(this, callSettings);
 
         /// <inheritdoc/>
         public override bool Equals(object o) =>
@@ -382,12 +381,12 @@ namespace Google.Cloud.Spanner.V1
         /// <summary>
         /// 
         /// </summary>
-        /// <param name="session"></param>
+        /// <param name="transaction"></param>
         /// <param name="callSettings"></param>
         /// <param name="creationOptions"></param>
         /// <returns></returns>
-        public Task<PartitionResponse> PartitionReadOrQueryAsync(TargetedMultiplexSession session, CallSettings callSettings, TransactionOptions creationOptions) =>
-            session.PartitionReadOrQueryAsync(this, callSettings, creationOptions);
+        public Task<PartitionResponse> PartitionReadOrQueryAsync(Transaction transaction, CallSettings callSettings, TransactionOptions creationOptions) =>
+            transaction.PartitionReadOrQueryAsync(this, callSettings);
 
         /// <inheritdoc/>
         public override bool Equals(object o) =>
