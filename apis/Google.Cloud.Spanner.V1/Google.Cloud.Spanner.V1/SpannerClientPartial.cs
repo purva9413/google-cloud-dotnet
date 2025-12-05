@@ -14,6 +14,7 @@
 
 using Google.Api.Gax.Grpc;
 using Google.Cloud.Spanner.Common.V1;
+using System;
 
 namespace Google.Cloud.Spanner.V1
 {
@@ -39,9 +40,11 @@ namespace Google.Cloud.Spanner.V1
 
         internal void MaybeApplyRouteToLeaderHeader(ref CallSettings settings)
         {
+            Console.WriteLine($"In MaybeApplyRouteToLeaderHeader {Settings.LeaderRoutingEnabled}");
             if (Settings.LeaderRoutingEnabled)
             {
-                settings = settings.WithHeader(LeaderRoutingHeader, bool.TrueString);
+                Console.WriteLine($"Adding LAR header {LeaderRoutingHeader}, {true}");
+                settings = settings.WithHeader(LeaderRoutingHeader, "true");
             }
         }
     }
@@ -155,6 +158,7 @@ namespace Google.Cloud.Spanner.V1
         internal static void ApplyResourcePrefixHeaderFromSession(ref CallSettings settings, string resource)
         {
             // If we haven't been given a resource name, just leave the request as it is.
+            
             if (string.IsNullOrEmpty(resource))
             {
                 return;
@@ -165,6 +169,7 @@ namespace Google.Cloud.Spanner.V1
                 var database = DatabaseName.FromProjectInstanceDatabase(
                     session.ProjectId, session.InstanceId, session.DatabaseId);
                 settings = settings.WithHeader(ResourcePrefixHeader, database.ToString());
+                Console.WriteLine($"Adding resource prefix header {ResourcePrefixHeader}, {database.ToString()}");
             }
         }
     }

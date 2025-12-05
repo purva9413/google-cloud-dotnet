@@ -94,7 +94,7 @@ public abstract class SpannerTestDatabaseBase
         {
             Host = SpannerHost,
             DataSource = $"projects/{ProjectId}/instances/{SpannerInstance}",
-            EmulatorDetection = emulatorDetection
+            EmulatorDetection = emulatorDetection,
         };
         if (SpannerPort != null)
         {

@@ -9,6 +9,6 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ConfigureAwaitChecker.Analyzer" PrivateAssets="All" />
-    <PackageReference Include="Google.Api.Gax" />
+    <ProjectReference Include="C:\Users\purvavasudeo\cloud-sdk-team\gax-dotnet\Google.Api.Gax\Google.Api.Gax.csproj" />
   </ItemGroup>
 </Project>
